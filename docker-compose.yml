@@ -1,0 +1,92 @@
+# ========== CLUSTER RABBITMQ (2 NODOS) - BARRIODIGITAL ==========
+# rabbit1 -> AMQP 5672 | Management UI http://localhost:15672
+# rabbit2 -> AMQP 5673 | Management UI http://localhost:15673
+#
+# Levantar:        docker compose up -d
+# Ver el cluster:  docker exec rabbit1 rabbitmqctl cluster_status
+#
+# Credenciales y cookie se pueden sobrescribir con variables de entorno
+# (o un .env junto a este archivo). Los valores por defecto son para desarrollo local.
+
+name: barriodigital-rabbitmq
+
+services:
+  # ========== NODO 1 (SEMILLA) ==========
+  rabbit1:
+    image: rabbitmq:4.2-management
+    container_name: rabbit1
+    # El hostname define el nombre del nodo (rabbit@rabbit1)
+    hostname: rabbit1
+    entrypoint: ["bash", "/opt/cluster/cluster-entrypoint.sh"]
+
+    ports:
+      - "5672:5672"    # AMQP
+      - "15672:15672"  # Management UI
+
+    environment:
+      RABBITMQ_DEFAULT_USER: ${RABBITMQ_USERNAME:-barriodigital}
+      RABBITMQ_DEFAULT_PASS: ${RABBITMQ_PASSWORD:-barrio2026Rabbit}
+      # Misma cookie en ambos nodos: requisito para el clustering
+      ERLANG_COOKIE: ${RABBITMQ_ERLANG_COOKIE:-barriodigital-cluster-cookie}
+
+    volumes:
+      - rabbit1_data:/var/lib/rabbitmq
+      - ./docker/rabbitmq/cluster-entrypoint.sh:/opt/cluster/cluster-entrypoint.sh:ro
+
+    healthcheck:
+      test: ["CMD", "rabbitmq-diagnostics", "-q", "check_running"]
+      interval: 10s
+      timeout: 10s
+      retries: 12
+      start_period: 30s
+
+    networks:
+      - barriodigital-net
+
+  # ========== NODO 2 (SE UNE AL CLUSTER DE rabbit1) ==========
+  rabbit2:
+    image: rabbitmq:4.2-management
+    container_name: rabbit2
+    hostname: rabbit2
+    entrypoint: ["bash", "/opt/cluster/cluster-entrypoint.sh"]
+
+    ports:
+      - "5673:5672"    # AMQP
+      - "15673:15672"  # Management UI
+
+    environment:
+      RABBITMQ_DEFAULT_USER: ${RABBITMQ_USERNAME:-barriodigital}
+      RABBITMQ_DEFAULT_PASS: ${RABBITMQ_PASSWORD:-barrio2026Rabbit}
+      ERLANG_COOKIE: ${RABBITMQ_ERLANG_COOKIE:-barriodigital-cluster-cookie}
+      # Nodo al que se une al arrancar (ver cluster-entrypoint.sh)
+      JOIN_CLUSTER_HOST: rabbit1
+
+    volumes:
+      - rabbit2_data:/var/lib/rabbitmq
+      - ./docker/rabbitmq/cluster-entrypoint.sh:/opt/cluster/cluster-entrypoint.sh:ro
+
+    # Arranca junto con rabbit1 (no espera a que este sano): en RabbitMQ 4.x los nodos
+    # de un cluster ya formado necesitan a la mayoria (con 2 nodos, ambos) para terminar de arrancar.
+    # Si rabbit2 esperara a rabbit1 "healthy", se esperarian mutuamente al reiniciar.
+    # La espera para unirse la primera vez la hace cluster-entrypoint.sh.
+    depends_on:
+      rabbit1:
+        condition: service_started
+
+    healthcheck:
+      test: ["CMD", "rabbitmq-diagnostics", "-q", "check_running"]
+      interval: 10s
+      timeout: 10s
+      retries: 12
+      start_period: 30s
+
+    networks:
+      - barriodigital-net
+
+volumes:
+  rabbit1_data:
+  rabbit2_data:
+
+networks:
+  barriodigital-net:
+    name: barriodigital-net

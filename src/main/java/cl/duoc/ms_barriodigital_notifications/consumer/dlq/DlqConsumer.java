@@ -1,4 +1,4 @@
-package cl.duoc.ms_barriodigital_notifications.consumer;
+package cl.duoc.ms_barriodigital_notifications.consumer.dlq;
 
 import cl.duoc.ms_barriodigital_notifications.config.RabbitMQConfig;
 import com.rabbitmq.client.Channel;
@@ -13,7 +13,7 @@ import java.util.List;
 import java.util.Map;
 
 /**
- * Monitor de las 3 Dead Letter Queues.
+ * Dominio DLQ: monitor de las 3 Dead Letter Queues.
  *
  * Recibe el Message crudo (no un DTO) porque a la DLQ llegan justamente los mensajes
  * que pueden venir mal formados. Los registra con WARN y hace ACK manual para sacarlos de la DLQ.

@@ -1,5 +1,6 @@
 package cl.duoc.ms_barriodigital_notifications.config;
 
+import lombok.extern.slf4j.Slf4j;
 import org.springframework.amqp.AmqpRejectAndDontRequeueException;
 import org.springframework.amqp.core.Binding;
 import org.springframework.amqp.core.BindingBuilder;
@@ -12,6 +13,7 @@ import org.springframework.amqp.rabbit.config.SimpleRabbitListenerContainerFacto
 import org.springframework.amqp.rabbit.connection.ConnectionFactory;
 import org.springframework.amqp.rabbit.retry.MessageRecoverer;
 import org.springframework.amqp.support.converter.JacksonJsonMessageConverter;
+import org.springframework.amqp.support.converter.MessageConversionException;
 import org.springframework.amqp.support.converter.MessageConverter;
 import org.springframework.amqp.support.converter.SimpleMessageConverter;
 import org.springframework.boot.amqp.autoconfigure.SimpleRabbitListenerContainerFactoryConfigurer;
@@ -29,6 +31,7 @@ import org.springframework.context.annotation.Configuration;
  *
  * Al arrancar, el RabbitAdmin de Spring Boot declara en el broker todos los beans de este archivo.
  */
+@Slf4j
 @Configuration
 public class RabbitMQConfig {
 
@@ -94,8 +97,20 @@ public class RabbitMQConfig {
     @Bean
     public MessageRecoverer rechazarADlqRecoverer() {
         return (message, causa) -> {
+            log.error("Reintentos agotados para el mensaje de {} ({}). Se envía a la DLQ.",
+                    message.getMessageProperties().getConsumerQueue(), motivoDelFallo(causa));
             throw new AmqpRejectAndDontRequeueException("Reintentos agotados, se envía a la DLQ", true, causa);
         };
+    }
+
+    /** Resume la causa en una frase corta para el log (la traza completa no aporta en este caso). */
+    private static String motivoDelFallo(Throwable causa) {
+        for (Throwable t = causa; t != null; t = t.getCause()) {
+            if (t instanceof MessageConversionException) {
+                return "el contenido no es un JSON valido";
+            }
+        }
+        return causa.getMessage();
     }
 
     // ========== CONTAINER FACTORY PARA LAS DLQ ==========

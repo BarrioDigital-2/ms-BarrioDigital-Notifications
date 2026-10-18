@@ -297,14 +297,17 @@ Resources:
   HttpApi:
     Type: AWS::ApiGatewayV2::Api
     Properties:
-      Name: !Sub "barriodigital-api-${AWS::StackName}"
+      # Mismo nombre y misma configuracion que el API Gateway del entorno original
+      Name: barriodigital-api
       ProtocolType: HTTP
       CorsConfiguration:
         AllowOrigins: [!Sub "https://${WebEIP}"]
         AllowMethods: [GET, POST, PUT, DELETE, OPTIONS]
         AllowHeaders: [authorization, content-type]
-        MaxAge: 3600
+        AllowCredentials: false
+        MaxAge: 0
 
+  # Valida el JWT emitido por Azure AD: firma, emisor (issuer) y audiencia (client ID)
   JwtAuthorizer:
     Type: AWS::ApiGatewayV2::Authorizer
     Properties:
@@ -314,55 +317,82 @@ Resources:
       IdentitySource: ["$request.header.Authorization"]
       JwtConfiguration:
         Issuer: !Sub "https://login.microsoftonline.com/${AzureTenantId}/v2.0"
-        Audience:
-          - !Ref AzureClientId
-          - !Sub "api://${AzureClientId}"
+        Audience: [!Ref AzureClientId]
 
-  BffIntegration:
+  # ---------- Integraciones: una por endpoint del BFF ----------
+  IntegrationListar:
     Type: AWS::ApiGatewayV2::Integration
     Properties:
       ApiId: !Ref HttpApi
       IntegrationType: HTTP_PROXY
-      IntegrationMethod: ANY
-      IntegrationUri: !Sub "http://${WebEIP}:8080/api/{proxy}"
+      IntegrationMethod: GET
+      IntegrationUri: !Sub "http://${WebEIP}:8080/api/bff/requests"
       PayloadFormatVersion: "1.0"
 
-  # Una ruta por metodo (no ANY) para que el preflight OPTIONS lo responda el CORS del API Gateway
-  RouteGet:
-    Type: AWS::ApiGatewayV2::Route
+  IntegrationCrear:
+    Type: AWS::ApiGatewayV2::Integration
     Properties:
       ApiId: !Ref HttpApi
-      RouteKey: "GET /api/{proxy+}"
-      AuthorizationType: JWT
-      AuthorizerId: !Ref JwtAuthorizer
-      Target: !Sub "integrations/${BffIntegration}"
+      IntegrationType: HTTP_PROXY
+      IntegrationMethod: POST
+      IntegrationUri: !Sub "http://${WebEIP}:8080/api/bff/requests"
+      PayloadFormatVersion: "1.0"
 
-  RoutePost:
-    Type: AWS::ApiGatewayV2::Route
+  # Tambien atiende GET /api/bff/requests/mine (id = "mine"), que el BFF resuelve como "mis tramites"
+  IntegrationObtener:
+    Type: AWS::ApiGatewayV2::Integration
     Properties:
       ApiId: !Ref HttpApi
-      RouteKey: "POST /api/{proxy+}"
-      AuthorizationType: JWT
-      AuthorizerId: !Ref JwtAuthorizer
-      Target: !Sub "integrations/${BffIntegration}"
+      IntegrationType: HTTP_PROXY
+      IntegrationMethod: GET
+      IntegrationUri: !Sub "http://${WebEIP}:8080/api/bff/requests/{id}"
+      PayloadFormatVersion: "1.0"
 
-  RoutePut:
-    Type: AWS::ApiGatewayV2::Route
+  IntegrationCambiarEstado:
+    Type: AWS::ApiGatewayV2::Integration
     Properties:
       ApiId: !Ref HttpApi
-      RouteKey: "PUT /api/{proxy+}"
-      AuthorizationType: JWT
-      AuthorizerId: !Ref JwtAuthorizer
-      Target: !Sub "integrations/${BffIntegration}"
+      IntegrationType: HTTP_PROXY
+      IntegrationMethod: PUT
+      IntegrationUri: !Sub "http://${WebEIP}:8080/api/bff/requests/{id}/status"
+      PayloadFormatVersion: "1.0"
 
-  RouteDelete:
+  # ---------- Rutas: todas protegidas con el autorizador JWT ----------
+  RouteListar:
     Type: AWS::ApiGatewayV2::Route
     Properties:
       ApiId: !Ref HttpApi
-      RouteKey: "DELETE /api/{proxy+}"
+      RouteKey: "GET /api/bff/requests"
       AuthorizationType: JWT
       AuthorizerId: !Ref JwtAuthorizer
-      Target: !Sub "integrations/${BffIntegration}"
+      Target: !Sub "integrations/${IntegrationListar}"
+
+  RouteCrear:
+    Type: AWS::ApiGatewayV2::Route
+    Properties:
+      ApiId: !Ref HttpApi
+      RouteKey: "POST /api/bff/requests"
+      AuthorizationType: JWT
+      AuthorizerId: !Ref JwtAuthorizer
+      Target: !Sub "integrations/${IntegrationCrear}"
+
+  RouteObtener:
+    Type: AWS::ApiGatewayV2::Route
+    Properties:
+      ApiId: !Ref HttpApi
+      RouteKey: "GET /api/bff/requests/{id}"
+      AuthorizationType: JWT
+      AuthorizerId: !Ref JwtAuthorizer
+      Target: !Sub "integrations/${IntegrationObtener}"
+
+  RouteCambiarEstado:
+    Type: AWS::ApiGatewayV2::Route
+    Properties:
+      ApiId: !Ref HttpApi
+      RouteKey: "PUT /api/bff/requests/{id}/status"
+      AuthorizationType: JWT
+      AuthorizerId: !Ref JwtAuthorizer
+      Target: !Sub "integrations/${IntegrationCambiarEstado}"
 
   ApiStage:
     Type: AWS::ApiGatewayV2::Stage

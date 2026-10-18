@@ -1,0 +1,9 @@
+# Archivos que NO se copian al construir la imagen
+target/
+.git/
+.idea/
+.vscode/
+*.iml
+*.md
+docker/
+docker-compose.yml

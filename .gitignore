@@ -31,3 +31,6 @@ build/
 
 ### VS Code ###
 .vscode/
+
+### Secretos del despliegue (usar .env.example como plantilla) ###
+.env

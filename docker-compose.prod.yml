@@ -1,0 +1,55 @@
+# ========== EC2 MENSAJERIA: complemento para produccion ==========
+# Se usa JUNTO con docker-compose.yml (el cluster RabbitMQ) y le agrega:
+#   - ms-notifications (consumidor)
+#   - ms-rabbit-admin  (API de administracion; repo clonado al lado de este)
+#
+# Uso (en la EC2, dentro de esta carpeta):
+#   cp .env.example .env    -> completar los valores
+#   docker compose -f docker-compose.yml -f docker-compose.prod.yml up -d --build
+#
+# En local se sigue usando solo docker-compose.yml (solo el cluster).
+
+services:
+  # Los nodos se reinician solos si la EC2 se reinicia
+  rabbit1:
+    restart: unless-stopped
+  rabbit2:
+    restart: unless-stopped
+
+  # ========== CONSUMIDOR ==========
+  notifications:
+    build: .
+    container_name: ms-notifications
+    depends_on:
+      rabbit1:
+        condition: service_healthy
+    environment:
+      # Dentro de la red de Docker, el nodo se llama por su nombre de servicio
+      RABBITMQ_HOST: rabbit1
+      RABBITMQ_PORT: 5672
+      RABBITMQ_USERNAME: ${RABBITMQ_USERNAME:?Falta RABBITMQ_USERNAME en .env}
+      RABBITMQ_PASSWORD: ${RABBITMQ_PASSWORD:?Falta RABBITMQ_PASSWORD en .env}
+    ports:
+      - "8082:8082"
+    networks:
+      - barriodigital-net
+    restart: unless-stopped
+
+  # ========== ADMINISTRADOR ==========
+  rabbit-admin:
+    build: ../ms-barriodigital-rabbit-admin
+    container_name: ms-rabbit-admin
+    depends_on:
+      rabbit1:
+        condition: service_healthy
+    environment:
+      RABBITMQ_HOST: rabbit1
+      RABBITMQ_PORT: 5672
+      RABBITMQ_USERNAME: ${RABBITMQ_USERNAME}
+      RABBITMQ_PASSWORD: ${RABBITMQ_PASSWORD}
+      RABBITMQ_MANAGEMENT_URL: http://rabbit1:15672
+    ports:
+      - "8083:8083"
+    networks:
+      - barriodigital-net
+    restart: unless-stopped

@@ -1,0 +1,401 @@
+AWSTemplateFormatVersion: "2010-09-09"
+Description: >-
+  BarrioDigital completo en 3 EC2 + API Gateway (AWS Academy Learner Lab).
+  WEB (front + BFF), DATOS (MySQL + ms-requests) y MENSAJERIA (cluster RabbitMQ de 2 nodos +
+  ms-notifications + ms-rabbit-admin). Cada EC2 instala Docker, clona los repos publicos de
+  BarrioDigital-2 y levanta sus microservicios al arrancar (UserData). Tarda ~15 min en quedar listo.
+
+# ======================================================================
+# PARAMETROS: lo que cada estudiante completa al crear el stack
+# ======================================================================
+Parameters:
+  KeyName:
+    Type: AWS::EC2::KeyPair::KeyName
+    Description: Par de claves para entrar por SSH (en Learner Lab suele existir "vockey")
+
+  MiIpCidr:
+    Type: String
+    Description: Tu IP publica con /32 (ej. 181.43.211.131/32). Solo esa IP puede usar SSH, el panel de RabbitMQ y rabbit-admin
+    AllowedPattern: '^(\d{1,3}\.){3}\d{1,3}/\d{1,2}$'
+    ConstraintDescription: Debe tener formato x.x.x.x/32
+
+  AzureTenantId:
+    Type: String
+    Default: 92b9ffd8-4da1-4956-b85b-62654b654d25
+    Description: Directory (tenant) ID de TU app de Azure AD (Azure Portal > App registrations > tu app > Overview)
+
+  AzureClientId:
+    Type: String
+    Default: 8b0cc19f-2671-49c7-beff-816087690691
+    Description: Application (client) ID de TU app de Azure AD. Lo usan el front, el API Gateway, el BFF y ms-requests
+
+  DbRootPassword:
+    Type: String
+    NoEcho: true
+    MinLength: 8
+    AllowedPattern: '^[A-Za-z0-9_-]+$'
+    Description: Clave del usuario root de MySQL (solo letras, numeros, - y _)
+
+  DbPassword:
+    Type: String
+    NoEcho: true
+    MinLength: 8
+    AllowedPattern: '^[A-Za-z0-9_-]+$'
+    Description: Clave del usuario de la aplicacion en MySQL
+
+  RabbitUsername:
+    Type: String
+    Default: barriodigital
+    Description: Usuario de RabbitMQ
+
+  RabbitPassword:
+    Type: String
+    NoEcho: true
+    MinLength: 8
+    AllowedPattern: '^[A-Za-z0-9_-]+$'
+    Description: Clave de RabbitMQ (la usan ms-requests, notifications y rabbit-admin)
+
+  RabbitErlangCookie:
+    Type: String
+    NoEcho: true
+    MinLength: 20
+    AllowedPattern: '^[A-Za-z0-9_-]+$'
+    Description: Cookie compartida entre los 2 nodos del cluster (texto largo al azar)
+
+  AmiId:
+    Type: AWS::SSM::Parameter::Value<AWS::EC2::Image::Id>
+    Default: /aws/service/ami-amazon-linux-latest/al2023-ami-kernel-default-x86_64
+    Description: Amazon Linux 2023 (se resuelve solo, no cambiar)
+
+Metadata:
+  AWS::CloudFormation::Interface:
+    ParameterGroups:
+      - Label: { default: "Acceso" }
+        Parameters: [KeyName, MiIpCidr]
+      - Label: { default: "Azure AD (IDaaS)" }
+        Parameters: [AzureTenantId, AzureClientId]
+      - Label: { default: "Claves (no se muestran despues)" }
+        Parameters: [DbRootPassword, DbPassword, RabbitUsername, RabbitPassword, RabbitErlangCookie]
+      - Label: { default: "Avanzado" }
+        Parameters: [AmiId]
+
+Resources:
+  # ======================================================================
+  # SECURITY GROUPS (firewall de cada EC2)
+  # ======================================================================
+  WebSecurityGroup:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupDescription: BarrioDigital WEB - front (HTTPS) y BFF
+      SecurityGroupIngress:
+        - { IpProtocol: tcp, FromPort: 80, ToPort: 80, CidrIp: 0.0.0.0/0, Description: "HTTP (redirige a HTTPS)" }
+        - { IpProtocol: tcp, FromPort: 443, ToPort: 443, CidrIp: 0.0.0.0/0, Description: "Front HTTPS" }
+        - { IpProtocol: tcp, FromPort: 8080, ToPort: 8080, CidrIp: 0.0.0.0/0, Description: "BFF (lo llama el API Gateway)" }
+        - { IpProtocol: tcp, FromPort: 22, ToPort: 22, CidrIp: !Ref MiIpCidr, Description: "SSH" }
+      Tags: [{ Key: Name, Value: sg-barriodigital-web }]
+
+  DatosSecurityGroup:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupDescription: BarrioDigital DATOS - MySQL + ms-requests
+      SecurityGroupIngress:
+        - { IpProtocol: tcp, FromPort: 8081, ToPort: 8081, SourceSecurityGroupId: !GetAtt WebSecurityGroup.GroupId, Description: "Solo el BFF llama a ms-requests" }
+        - { IpProtocol: tcp, FromPort: 22, ToPort: 22, CidrIp: !Ref MiIpCidr, Description: "SSH" }
+      Tags: [{ Key: Name, Value: sg-barriodigital-datos }]
+
+  MensajeriaSecurityGroup:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupDescription: BarrioDigital MENSAJERIA - RabbitMQ + notifications + rabbit-admin
+      SecurityGroupIngress:
+        - { IpProtocol: tcp, FromPort: 5672, ToPort: 5672, SourceSecurityGroupId: !GetAtt DatosSecurityGroup.GroupId, Description: "ms-requests publica eventos" }
+        - { IpProtocol: tcp, FromPort: 15672, ToPort: 15673, CidrIp: !Ref MiIpCidr, Description: "Paneles RabbitMQ (nodo 1 y 2)" }
+        - { IpProtocol: tcp, FromPort: 8083, ToPort: 8083, CidrIp: !Ref MiIpCidr, Description: "rabbit-admin (sin login: solo tu IP)" }
+        - { IpProtocol: tcp, FromPort: 22, ToPort: 22, CidrIp: !Ref MiIpCidr, Description: "SSH" }
+      Tags: [{ Key: Name, Value: sg-barriodigital-mensajeria }]
+
+  # ======================================================================
+  # IPs ELASTICAS (no cambian al reiniciar el lab)
+  # ======================================================================
+  WebEIP:
+    Type: AWS::EC2::EIP
+    Properties:
+      Domain: vpc
+      Tags: [{ Key: Name, Value: eip-barriodigital-web }]
+
+  MensajeriaEIP:
+    Type: AWS::EC2::EIP
+    Properties:
+      Domain: vpc
+      Tags: [{ Key: Name, Value: eip-barriodigital-mensajeria }]
+
+  # ======================================================================
+  # EC2 MENSAJERIA: cluster RabbitMQ + ms-notifications + ms-rabbit-admin
+  # ======================================================================
+  MensajeriaInstance:
+    Type: AWS::EC2::Instance
+    Properties:
+      ImageId: !Ref AmiId
+      InstanceType: t3.medium
+      KeyName: !Ref KeyName
+      SecurityGroupIds: [!GetAtt MensajeriaSecurityGroup.GroupId]
+      BlockDeviceMappings:
+        - DeviceName: /dev/xvda
+          Ebs: { VolumeSize: 20, VolumeType: gp3 }
+      Tags: [{ Key: Name, Value: mensajeria-barriodigital }]
+      UserData:
+        Fn::Base64: !Sub |
+          #!/bin/bash
+          set -eu
+          exec > >(tee /var/log/barriodigital-init.log) 2>&1
+          echo "== [1/4] Swap de 2 GB (evita quedarse sin memoria al compilar)"
+          fallocate -l 2G /swapfile && chmod 600 /swapfile && mkswap /swapfile && swapon /swapfile
+          echo '/swapfile swap swap defaults 0 0' >> /etc/fstab
+          echo "== [2/4] Docker, git, compose y buildx"
+          dnf install -y docker git
+          systemctl enable --now docker
+          usermod -aG docker ec2-user
+          mkdir -p /usr/local/lib/docker/cli-plugins
+          curl -sSL https://github.com/docker/compose/releases/download/v2.29.7/docker-compose-linux-x86_64 -o /usr/local/lib/docker/cli-plugins/docker-compose
+          curl -sSL https://github.com/docker/buildx/releases/download/v0.17.1/buildx-v0.17.1.linux-amd64 -o /usr/local/lib/docker/cli-plugins/docker-buildx
+          chmod +x /usr/local/lib/docker/cli-plugins/*
+          echo "== [3/4] Repos"
+          mkdir -p /opt/barriodigital && cd /opt/barriodigital
+          git clone https://github.com/BarrioDigital-2/ms-BarrioDigital-Notifications.git ms-barriodigital-notifications
+          git clone https://github.com/BarrioDigital-2/ms-barriodigital-rabbit-admin.git
+          cd ms-barriodigital-notifications
+          cat > .env <<EOF
+          RABBITMQ_USERNAME=${RabbitUsername}
+          RABBITMQ_PASSWORD=${RabbitPassword}
+          RABBITMQ_ERLANG_COOKIE=${RabbitErlangCookie}
+          EOF
+          chmod 600 .env
+          echo "== [4/4] Levantar cluster + microservicios"
+          docker compose -f docker-compose.yml -f docker-compose.prod.yml up -d --build
+          chown -R ec2-user:ec2-user /opt/barriodigital
+          echo "== MENSAJERIA LISTA"
+
+  MensajeriaEIPAssociation:
+    Type: AWS::EC2::EIPAssociation
+    Properties:
+      AllocationId: !GetAtt MensajeriaEIP.AllocationId
+      InstanceId: !Ref MensajeriaInstance
+
+  # ======================================================================
+  # EC2 DATOS: MySQL + ms-requests (publica en la IP privada de MENSAJERIA)
+  # ======================================================================
+  DatosInstance:
+    Type: AWS::EC2::Instance
+    Properties:
+      ImageId: !Ref AmiId
+      InstanceType: t3.small
+      KeyName: !Ref KeyName
+      SecurityGroupIds: [!GetAtt DatosSecurityGroup.GroupId]
+      BlockDeviceMappings:
+        - DeviceName: /dev/xvda
+          Ebs: { VolumeSize: 20, VolumeType: gp3 }
+      Tags: [{ Key: Name, Value: datos-barriodigital }]
+      UserData:
+        Fn::Base64: !Sub |
+          #!/bin/bash
+          set -eu
+          exec > >(tee /var/log/barriodigital-init.log) 2>&1
+          echo "== [1/4] Swap de 2 GB"
+          fallocate -l 2G /swapfile && chmod 600 /swapfile && mkswap /swapfile && swapon /swapfile
+          echo '/swapfile swap swap defaults 0 0' >> /etc/fstab
+          echo "== [2/4] Docker, git, compose y buildx"
+          dnf install -y docker git
+          systemctl enable --now docker
+          usermod -aG docker ec2-user
+          mkdir -p /usr/local/lib/docker/cli-plugins
+          curl -sSL https://github.com/docker/compose/releases/download/v2.29.7/docker-compose-linux-x86_64 -o /usr/local/lib/docker/cli-plugins/docker-compose
+          curl -sSL https://github.com/docker/buildx/releases/download/v0.17.1/buildx-v0.17.1.linux-amd64 -o /usr/local/lib/docker/cli-plugins/docker-buildx
+          chmod +x /usr/local/lib/docker/cli-plugins/*
+          echo "== [3/4] Repo"
+          mkdir -p /opt/barriodigital && cd /opt/barriodigital
+          git clone https://github.com/BarrioDigital-2/ms-barriodigital-requests.git
+          cd ms-barriodigital-requests
+          cat > .env <<EOF
+          DB_ROOT_PASSWORD=${DbRootPassword}
+          DB_NAME=barriodigital
+          DB_USERNAME=barriodigital
+          DB_PASSWORD=${DbPassword}
+          AZURE_TENANT_ID=${AzureTenantId}
+          AZURE_API_CLIENT_ID=${AzureClientId}
+          RABBITMQ_HOST=${MensajeriaInstance.PrivateIp}
+          RABBITMQ_PORT=5672
+          RABBITMQ_USERNAME=${RabbitUsername}
+          RABBITMQ_PASSWORD=${RabbitPassword}
+          EOF
+          chmod 600 .env
+          echo "== [4/4] Levantar MySQL + ms-requests"
+          docker compose up -d --build
+          chown -R ec2-user:ec2-user /opt/barriodigital
+          echo "== DATOS LISTA"
+
+  # ======================================================================
+  # EC2 WEB: front (nginx HTTPS) + BFF, ambos en Docker
+  # ======================================================================
+  WebInstance:
+    Type: AWS::EC2::Instance
+    Properties:
+      ImageId: !Ref AmiId
+      InstanceType: t3.small
+      KeyName: !Ref KeyName
+      SecurityGroupIds: [!GetAtt WebSecurityGroup.GroupId]
+      BlockDeviceMappings:
+        - DeviceName: /dev/xvda
+          Ebs: { VolumeSize: 20, VolumeType: gp3 }
+      Tags: [{ Key: Name, Value: web-barriodigital }]
+      UserData:
+        Fn::Base64: !Sub |
+          #!/bin/bash
+          set -eu
+          exec > >(tee /var/log/barriodigital-init.log) 2>&1
+          echo "== [1/5] Swap de 2 GB (compilar Angular necesita memoria)"
+          fallocate -l 2G /swapfile && chmod 600 /swapfile && mkswap /swapfile && swapon /swapfile
+          echo '/swapfile swap swap defaults 0 0' >> /etc/fstab
+          echo "== [2/5] Docker, git y buildx"
+          dnf install -y docker git
+          systemctl enable --now docker
+          usermod -aG docker ec2-user
+          mkdir -p /usr/local/lib/docker/cli-plugins
+          curl -sSL https://github.com/docker/buildx/releases/download/v0.17.1/buildx-v0.17.1.linux-amd64 -o /usr/local/lib/docker/cli-plugins/docker-buildx
+          chmod +x /usr/local/lib/docker/cli-plugins/*
+          echo "== [3/5] Repos"
+          mkdir -p /opt/barriodigital && cd /opt/barriodigital
+          git clone https://github.com/BarrioDigital-2/ms-barriodigital-bff.git
+          git clone https://github.com/BarrioDigital-2/barrioDigital-front-angular.git
+          echo "== [4/5] BFF -> llama a ms-requests por la IP privada de DATOS"
+          docker build -t barriodigital/bff ms-barriodigital-bff
+          docker run -d --name ms-bff --restart unless-stopped -p 8080:8080 \
+            -e AZURE_TENANT_ID=${AzureTenantId} \
+            -e AZURE_API_CLIENT_ID=${AzureClientId} \
+            -e REQUESTS_SERVICE_URL=http://${DatosInstance.PrivateIp}:8081 \
+            -e CORS_ALLOWED_ORIGINS=https://${WebEIP} \
+            barriodigital/bff
+          echo "== [5/5] Front -> URLs de ESTE despliegue (API Gateway e IP elastica)"
+          docker build -t barriodigital/front \
+            --build-arg API_URL=https://${HttpApi}.execute-api.${AWS::Region}.amazonaws.com/api \
+            --build-arg REDIRECT_URI=https://${WebEIP} \
+            --build-arg AZURE_CLIENT_ID=${AzureClientId} \
+            --build-arg AZURE_TENANT_ID=${AzureTenantId} \
+            barrioDigital-front-angular
+          docker run -d --name front --restart unless-stopped -p 80:80 -p 443:443 barriodigital/front
+          chown -R ec2-user:ec2-user /opt/barriodigital
+          echo "== WEB LISTA"
+
+  WebEIPAssociation:
+    Type: AWS::EC2::EIPAssociation
+    Properties:
+      AllocationId: !GetAtt WebEIP.AllocationId
+      InstanceId: !Ref WebInstance
+
+  # ======================================================================
+  # API GATEWAY (HTTP API): valida el JWT de Azure AD y reenvia al BFF
+  # ======================================================================
+  HttpApi:
+    Type: AWS::ApiGatewayV2::Api
+    Properties:
+      Name: !Sub "barriodigital-api-${AWS::StackName}"
+      ProtocolType: HTTP
+      CorsConfiguration:
+        AllowOrigins: [!Sub "https://${WebEIP}"]
+        AllowMethods: [GET, POST, PUT, DELETE, OPTIONS]
+        AllowHeaders: [authorization, content-type]
+        MaxAge: 3600
+
+  JwtAuthorizer:
+    Type: AWS::ApiGatewayV2::Authorizer
+    Properties:
+      ApiId: !Ref HttpApi
+      Name: azure-ad-jwt
+      AuthorizerType: JWT
+      IdentitySource: ["$request.header.Authorization"]
+      JwtConfiguration:
+        Issuer: !Sub "https://login.microsoftonline.com/${AzureTenantId}/v2.0"
+        Audience:
+          - !Ref AzureClientId
+          - !Sub "api://${AzureClientId}"
+
+  BffIntegration:
+    Type: AWS::ApiGatewayV2::Integration
+    Properties:
+      ApiId: !Ref HttpApi
+      IntegrationType: HTTP_PROXY
+      IntegrationMethod: ANY
+      IntegrationUri: !Sub "http://${WebEIP}:8080/api/{proxy}"
+      PayloadFormatVersion: "1.0"
+
+  # Una ruta por metodo (no ANY) para que el preflight OPTIONS lo responda el CORS del API Gateway
+  RouteGet:
+    Type: AWS::ApiGatewayV2::Route
+    Properties:
+      ApiId: !Ref HttpApi
+      RouteKey: "GET /api/{proxy+}"
+      AuthorizationType: JWT
+      AuthorizerId: !Ref JwtAuthorizer
+      Target: !Sub "integrations/${BffIntegration}"
+
+  RoutePost:
+    Type: AWS::ApiGatewayV2::Route
+    Properties:
+      ApiId: !Ref HttpApi
+      RouteKey: "POST /api/{proxy+}"
+      AuthorizationType: JWT
+      AuthorizerId: !Ref JwtAuthorizer
+      Target: !Sub "integrations/${BffIntegration}"
+
+  RoutePut:
+    Type: AWS::ApiGatewayV2::Route
+    Properties:
+      ApiId: !Ref HttpApi
+      RouteKey: "PUT /api/{proxy+}"
+      AuthorizationType: JWT
+      AuthorizerId: !Ref JwtAuthorizer
+      Target: !Sub "integrations/${BffIntegration}"
+
+  RouteDelete:
+    Type: AWS::ApiGatewayV2::Route
+    Properties:
+      ApiId: !Ref HttpApi
+      RouteKey: "DELETE /api/{proxy+}"
+      AuthorizationType: JWT
+      AuthorizerId: !Ref JwtAuthorizer
+      Target: !Sub "integrations/${BffIntegration}"
+
+  ApiStage:
+    Type: AWS::ApiGatewayV2::Stage
+    Properties:
+      ApiId: !Ref HttpApi
+      StageName: "$default"
+      AutoDeploy: true
+
+# ======================================================================
+# SALIDAS: las URLs de ESTE despliegue (pestaña Outputs del stack)
+# ======================================================================
+Outputs:
+  FrontUrl:
+    Description: Abrir en el navegador (aceptar la advertencia del certificado autofirmado)
+    Value: !Sub "https://${WebEIP}"
+  AzureRedirectUri:
+    Description: >-
+      IMPORTANTE - agregar en Azure Portal > App registrations > Authentication >
+      Single-page application (SPA) antes de iniciar sesion
+    Value: !Sub "https://${WebEIP}"
+  ApiGatewayUrl:
+    Description: URL del API Gateway (el front ya la trae configurada)
+    Value: !Sub "https://${HttpApi}.execute-api.${AWS::Region}.amazonaws.com/api"
+  RabbitPanelUrl:
+    Description: Panel de RabbitMQ (usuario y clave de los parametros)
+    Value: !Sub "http://${MensajeriaEIP}:15672"
+  RabbitAdminUrl:
+    Description: API de rabbit-admin (solo desde tu IP)
+    Value: !Sub "http://${MensajeriaEIP}:8083/api/admin/queues"
+  SshWeb:
+    Value: !Sub "ssh -i <tu-llave>.pem ec2-user@${WebEIP}"
+  SshMensajeria:
+    Value: !Sub "ssh -i <tu-llave>.pem ec2-user@${MensajeriaEIP}"
+  DatosPrivateIp:
+    Description: La EC2 de datos no tiene IP elastica; su IP publica se ve en la consola de EC2
+    Value: !GetAtt DatosInstance.PrivateIp

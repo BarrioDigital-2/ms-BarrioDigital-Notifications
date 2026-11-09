@@ -83,9 +83,52 @@ services:
     networks:
       - barriodigital-net
 
+
+
+
+      # ========== KAFKA ==========
+  zookeeper:
+    image: confluentinc/cp-zookeeper:7.9.0
+    container_name: zookeeper
+    hostname: zookeeper
+    ports:
+      - "2181:2181"
+    environment:
+      ZOOKEEPER_CLIENT_PORT: 2181
+      ZOOKEEPER_TICK_TIME: 2000
+    volumes:
+      - zookeeper_data:/var/lib/zookeeper/data
+    networks:
+      - barriodigital-net
+
+  kafka:
+    image: confluentinc/cp-kafka:7.9.0
+    container_name: kafka
+    hostname: kafka
+    depends_on:
+      - zookeeper
+    ports:
+      - "9092:9092"
+      - "9093:9093"
+    environment:
+      KAFKA_BROKER_ID: 1
+      KAFKA_ZOOKEEPER_CONNECT: zookeeper:2181
+      KAFKA_LISTENERS: INTERNAL://0.0.0.0:9093,EXTERNAL://0.0.0.0:9092
+      KAFKA_ADVERTISED_LISTENERS: INTERNAL://kafka:9093,EXTERNAL://localhost:9092
+      KAFKA_LISTENER_SECURITY_PROTOCOL_MAP: INTERNAL:PLAINTEXT,EXTERNAL:PLAINTEXT
+      KAFKA_INTER_BROKER_LISTENER_NAME: INTERNAL
+      KAFKA_OFFSETS_TOPIC_REPLICATION_FACTOR: 1
+      KAFKA_AUTO_CREATE_TOPICS_ENABLE: "false"
+    volumes:
+      - kafka_data:/var/lib/kafka/data
+    networks:
+      - barriodigital-net
+
 volumes:
   rabbit1_data:
   rabbit2_data:
+  zookeeper_data:
+  kafka_data:
 
 networks:
   barriodigital-net:

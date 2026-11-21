@@ -107,6 +107,7 @@ services:
     hostname: kafka
     depends_on:
       - zookeeper
+    restart: on-failure
     ports:
       - "9092:9092"
       - "9093:9093"

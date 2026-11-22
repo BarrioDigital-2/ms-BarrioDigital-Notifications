@@ -2,7 +2,7 @@
 
 Microservicio **consumidor** de BarrioDigital. Escucha en RabbitMQ los eventos de solicitudes vecinales (creación y cambio de estado) y genera las notificaciones. Los mensajes que no se pueden procesar terminan en **Dead Letter Queues (DLQ)**, donde se registran.
 
-Incluye además el `docker-compose.yml` del **cluster RabbitMQ de 2 nodos** que usa todo el sistema.
+El **cluster RabbitMQ de 2 nodos** (y el resto de la infraestructura) se levanta desde el repo **[barriodigital-infra](https://github.com/BarrioDigital-2/barriodigital-infra)**: `local/` para desarrollo y `aws/mensajeria/` para AWS.
 
 | | |
 |---|---|
@@ -89,8 +89,6 @@ src/main/java/cl/duoc/ms_barriodigital_notifications/
     │   └── NotificacionGeneralConsumer.java
     └── dlq/
         └── DlqConsumer.java             Monitor de las 3 DLQ
-docker-compose.yml                       Cluster RabbitMQ de 2 nodos
-docker/rabbitmq/cluster-entrypoint.sh    Une rabbit2 al cluster de rabbit1
 ```
 
 ---
@@ -126,7 +124,7 @@ En modo manual, el recoverer por defecto de Spring **no hace NACK** al agotar lo
 Spring Boot 4 usa Jackson 3. `Jackson2JsonMessageConverter` depende de Jackson 2 y fallaría; `JacksonJsonMessageConverter` es su reemplazo en Spring AMQP 4. Convierte el JSON al DTO usando el tipo del parámetro del `@RabbitListener`, sin depender de las clases del productor.
 
 ### Cluster de 2 nodos
-`rabbit1` y `rabbit2` comparten la Erlang cookie. `cluster-entrypoint.sh` une `rabbit2` a `rabbit1` (`stop_app` → `join_cluster` → `start_app`) y es idempotente: si ya pertenece al cluster, no vuelve a unirse. Los dos nodos arrancan juntos, porque en RabbitMQ 4.x un nodo de un cluster ya formado necesita a la mayoría para terminar de arrancar.
+`rabbit1` y `rabbit2` comparten la Erlang cookie. `cluster-entrypoint.sh` (en barriodigital-infra) une `rabbit2` a `rabbit1` (`stop_app` → `join_cluster` → `start_app`) y es idempotente: si ya pertenece al cluster, no vuelve a unirse. Los dos nodos arrancan juntos, porque en RabbitMQ 4.x un nodo de un cluster ya formado necesita a la mayoría para terminar de arrancar.
 
 ---
 
@@ -137,22 +135,17 @@ Spring Boot 4 usa Jackson 3. `Jackson2JsonMessageConverter` depende de Jackson 2
 - Java 17 o superior.
 - Puertos libres: 5672, 5673, 15672, 15673 y 8082.
 
-### 1. Levantar el cluster RabbitMQ
+### 1. Levantar la infraestructura (cluster RabbitMQ incluido)
 ```bash
+# desde barriodigital-infra/local
 docker compose up -d
-docker ps                                        # rabbit1 y rabbit2: healthy
 docker exec rabbit1 rabbitmqctl cluster_status   # Running Nodes: rabbit@rabbit1, rabbit@rabbit2
 ```
 Panel de administración: http://localhost:15672 (usuario `barriodigital`, contraseña `barrio2026Rabbit`). El nodo 2 está en http://localhost:15673.
 
 ### 2. Levantar el microservicio
-```bash
-# Linux / macOS
-RABBITMQ_USERNAME=barriodigital RABBITMQ_PASSWORD=barrio2026Rabbit ./mvnw clean spring-boot:run
-```
 ```powershell
-# Windows (PowerShell)
-$env:RABBITMQ_USERNAME="barriodigital"; $env:RABBITMQ_PASSWORD="barrio2026Rabbit"; .\mvnw.cmd clean spring-boot:run
+.\mvnw clean spring-boot:run "-Dmaven.test.skip=true"
 ```
 
 ### Variables de entorno
@@ -161,10 +154,8 @@ $env:RABBITMQ_USERNAME="barriodigital"; $env:RABBITMQ_PASSWORD="barrio2026Rabbit
 |----------|---------|-------------|
 | `RABBITMQ_HOST` | `localhost` | Host del broker |
 | `RABBITMQ_PORT` | `5672` | Puerto AMQP |
-| `RABBITMQ_USERNAME` | `guest` | Usuario. **En el cluster es `barriodigital`** |
-| `RABBITMQ_PASSWORD` | `guest` | Contraseña |
-
-El `docker-compose.yml` acepta `RABBITMQ_USERNAME`, `RABBITMQ_PASSWORD` y `RABBITMQ_ERLANG_COOKIE` para sobrescribir las credenciales y la cookie de desarrollo.
+| `RABBITMQ_USERNAME` | `barriodigital` | Usuario del cluster local |
+| `RABBITMQ_PASSWORD` | `barrio2026Rabbit` | Contraseña del cluster local (en AWS se pasa por variable) |
 
 ---
 
@@ -194,7 +185,7 @@ docker exec rabbit1 rabbitmqctl list_queues name messages_ready messages_unackno
 
 | Síntoma | Solución |
 |---------|----------|
-| `ACCESS_REFUSED` al arrancar | Faltan `RABBITMQ_USERNAME` y `RABBITMQ_PASSWORD`: los defaults `guest/guest` no sirven contra el cluster |
-| Un nodo queda en `health: starting` | Se levantó solo uno; `docker compose up -d` levanta los dos |
-| `rabbit2` no se une | `docker compose down -v` y `docker compose up -d` (borra los datos del cluster) |
+| `ACCESS_REFUSED` al arrancar | Credenciales distintas a las del cluster: revisar `RABBITMQ_USERNAME` / `RABBITMQ_PASSWORD` |
+| Un nodo queda en `health: starting` | Se levantó solo uno; `docker compose up -d` en `barriodigital-infra/local` levanta los dos |
+| `rabbit2` no se une | `docker compose down -v` y `docker compose up -d` en `barriodigital-infra/local` (borra los datos del cluster) |
 | Clases mal compiladas por el IDE | Usa siempre `clean` en el comando de Maven |

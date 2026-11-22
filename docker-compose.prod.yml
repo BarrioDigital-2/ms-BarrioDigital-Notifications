@@ -7,7 +7,8 @@
 #   cp .env.example .env    -> completar los valores
 #   docker compose -f docker-compose.yml -f docker-compose.prod.yml up -d --build
 #
-# En local se sigue usando solo docker-compose.yml (solo el cluster).
+# En local se usa "docker compose up -d" sin -f: carga docker-compose.yml + docker-compose.override.yml
+# (infraestructura + MySQL). Con los -f de arriba el override se ignora.
 
 services:
   # Los nodos se reinician solos si la EC2 se reinicia
